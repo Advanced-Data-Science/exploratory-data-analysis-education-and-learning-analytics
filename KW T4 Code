@@ -1,0 +1,188 @@
+
+---
+title: "T4 Data Analysis"
+author: "Katy Waterman"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(data.table)
+library(corrplot)
+library(lubridate)
+```
+
+# 0. Data Loading
+
+```{r}
+studentVle <- read.csv("~/Downloads/anonymisedData/studentVle.csv")
+assessments <- read.csv("~/Downloads/anonymisedData/assessments.csv")
+courses <- read.csv("~/Downloads/anonymisedData/courses.csv")
+vle <- read.csv("~/Downloads/anonymisedData/vle.csv")
+studentAssessment <- read.csv("~/Downloads/anonymisedData/studentAssessment.csv")
+studentInfo <- read.csv("~/Downloads/anonymisedData/studentInfo.csv")
+studentRegistration <- read.csv("~/Downloads/anonymisedData/studentRegistration.csv")
+```
+
+# 1. Data Cleaning & Merging
+
+```{r}
+studentInfo <- studentInfo %>% mutate(imd_band = ifelse(imd_band == "", "unknown", imd_band))
+studentAssessment <- studentAssessment %>% filter(!is.na(score))
+studentRegistration <- studentRegistration %>%
+  mutate(date_unregistration = ifelse(is.na(date_unregistration), "Active", date_unregistration))
+vle <- vle %>%
+  group_by(activity_type) %>%
+  mutate(week_from = median(week_from, na.rm = TRUE),
+         week_to = median(week_to, na.rm = TRUE)) %>%
+  ungroup() %>%
+  filter(!is.na(week_from), !is.na(week_to))
+
+setDT(studentVle)
+studentVle[, sum_click := sum(sum_click), by = .(id_student, code_module, date)]
+studentVle <- unique(studentVle, by = c("id_student", "code_module", "date"))
+studentVle[, sum_click := sum(sum_click), by = .(id_student, code_module)]
+studentVle_merge <- unique(studentVle, by = c("id_student", "code_module"))
+
+winsorize_columns <- function(df, cols) {
+  df[cols] <- lapply(df[cols], function(x) {
+    if (is.numeric(x)) {
+      lower <- quantile(x, 0.01, na.rm = TRUE)
+      upper <- quantile(x, 0.99, na.rm = TRUE)
+      x <- pmin(pmax(x, lower), upper)
+    }
+    return(x)
+  })
+  return(df)
+}
+
+studentAssessment <- winsorize_columns(studentAssessment, "date_submitted")
+studentRegistration <- winsorize_columns(studentRegistration, "date_registration")
+studentVle <- select(as.data.frame(studentVle), -date)
+studentVle <- winsorize_columns(studentVle, "sum_click")
+
+vle_merged <- studentVle_merge %>%
+  left_join(vle, by = c("id_site", "code_module", "code_presentation")) %>%
+  filter(!is.na(activity_type)) %>%
+  select(-date)
+
+merged_data <- studentAssessment %>%
+  left_join(assessments, by = "id_assessment") %>%
+  left_join(courses, by = c("code_module", "code_presentation")) %>%
+  left_join(studentRegistration, by = c("code_module", "code_presentation", "id_student")) %>%
+  left_join(studentInfo, by = c("id_student", "code_module", "code_presentation"))
+
+merged_data_vle <- merged_data %>%
+  left_join(vle_merged, by = c("id_student", "code_module", "code_presentation")) %>%
+  filter(!is.na(id_site)) %>%
+  select(-week_from, -week_to, -activity_type)
+```
+
+# 2. Variable Analysis (40 pts)
+
+## 2.1 Univariate Analysis
+
+```{r}
+ggplot(merged_data_vle, aes(x = score)) + 
+  geom_histogram(bins = 30, fill = "skyblue") + 
+  ggtitle("Distribution of Student Scores")
+
+ggplot(merged_data_vle, aes(x = sum_click)) + 
+  geom_histogram(bins = 30, fill = "skyblue") + 
+  ggtitle("Distribution of Student Clicks")
+
+ggplot(merged_data_vle, aes(y = score)) + 
+  geom_boxplot(fill = "skyblue") + 
+  ggtitle("Boxplot of Student Scores")
+
+ggplot(merged_data_vle, aes(y = sum_click)) + 
+  geom_boxplot(fill = "skyblue") + 
+  ggtitle("Boxplot of Student Clicks")
+
+```
+
+## 2.2 Summary Statistics
+
+```{r}
+summary(merged_data_vle)
+sapply(merged_data_vle, function(x) sum(is.na(x)))
+```
+
+## 2.3 Bivariate Analysis
+
+```{r}
+ggplot(merged_data_vle, aes(x = sum_click, y = score)) + 
+  geom_point(alpha = 0.3) + 
+  ggtitle("Score vs. Clicks")
+
+ggplot(merged_data_vle, aes(x = date_submitted, y = score)) + 
+  geom_point(alpha = 0.3) + 
+  ggtitle("Score vs. Date Submitted")
+
+```
+
+## 2.4 Multivariate Analysis
+
+```{r}
+ggplot(merged_data_vle, aes(x = sum_click, y = score, color = final_result)) + 
+  geom_point(alpha = 0.4) + 
+  ggtitle("Score vs. Clicks Colored by Final Result")
+
+ggplot(merged_data_vle, aes(x = imd_band, y = score, fill = final_result)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45)) +
+  ggtitle("Score by IMD Band and Final Result")
+
+numerics <- merged_data_vle[sapply(merged_data_vle, is.numeric)]
+cor_matrix <- cor(numerics, use = "complete.obs")
+corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.8)
+```
+
+# 3. Pattern Analysis (40 pts)
+
+## 3.1 Time Series Analysis
+
+```{r}
+merged_data_vle %>%
+  mutate(week = week(date_submitted)) %>%
+  group_by(week) %>%
+  summarise(avg_score = mean(score, na.rm = TRUE)) %>%
+  ggplot(aes(x = week, y = avg_score)) +
+  geom_line(color = "purple") +
+  ggtitle("Average Score by Submission Week")
+```
+
+## 3.2 Pattern Recognition
+
+```{r}
+ggplot(merged_data_vle, aes(x = score, fill = final_result)) +
+  geom_histogram(position = "identity", alpha = 0.6, bins = 40, color = "black") +
+  scale_fill_manual(values = c("Distinction" = "#E74C3C", 
+                               "Pass" = "#3498DB", 
+                               "Fail" = "#2ECC71", 
+                               "Withdrawn" = "#9B59B6")) +
+  labs(title = "Score Distribution by Final Result",
+       x = "Assessment Score",
+       y = "Number of Students",
+       fill = "Final Result") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"),
+        axis.text = element_text(color = "black"))
+
+```
+
+## 3.3 Segmentation Analysis
+
+```{r}
+merged_data_vle %>%
+  filter(imd_band != "unknown") %>%
+  group_by(imd_band) %>%
+  summarise(
+    avg_score = mean(score, na.rm = TRUE),
+    avg_clicks = mean(sum_click, na.rm = TRUE)
+  ) %>%
+  arrange(desc(avg_score))
+```
+
